@@ -1,16 +1,18 @@
 import asyncio
 import logging
+import os  # Добавь это
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.exceptions import TelegramForbiddenError
 
-# Включи логи для отладки
-logging.basicConfig(level=logging.INFO)
+# Твой токен — теперь из env (Leapcell подставит его автоматически)
+BOT_TOKEN = os.getenv('BOT_TOKEN')  # Если не задан, будет None — добавь проверку ниже
 
-# Твой токен
-BOT_TOKEN = 'YOUR_BOT_TOKEN'
+# Инициализация (добавь проверку, чтобы бот не запустился без токена)
+if not BOT_TOKEN:
+    logging.error("BOT_TOKEN не задан! Установи в Environment Variables.")
+    exit(1)
 
-# Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
