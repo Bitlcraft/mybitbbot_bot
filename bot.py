@@ -17,44 +17,55 @@ if not BOT_TOKEN:
     logging.error("BOT_TOKEN не задан!")
     exit(1)
 
-# БД файл
-DB_PATH = 'users.db'
+# БД путь — в /tmp для Leapcell (writable)
+DB_PATH = os.getenv('DB_PATH', '/tmp/users.db')
 
-# Инициализация БД
+# Инициализация БД с фиксом
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            chat_id INTEGER,
-            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                chat_id INTEGER,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.commit()
+        conn.close()
+        logging.info(f"БД инициализирована: {DB_PATH}")
+    except Exception as e:
+        logging.error(f"Ошибка init БД: {e}. Пинг будет на админах.")
 
 init_db()  # Запуск при старте
 
 def add_user(user_id, username, first_name, chat_id):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT OR IGNORE INTO users (user_id, username, first_name, chat_id)
-        VALUES (?, ?, ?, ?)
-    ''', (user_id, username, first_name, chat_id))
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR IGNORE INTO users (user_id, username, first_name, chat_id)
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, username, first_name, chat_id))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logging.warning(f"Ошибка add_user: {e}")
 
 def get_users(chat_id):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('SELECT user_id, username, first_name FROM users WHERE chat_id = ?', (chat_id,))
-    users = cursor.fetchall()
-    conn.close()
-    return users
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('SELECT user_id, username, first_name FROM users WHERE chat_id = ?', (chat_id,))
+        users = cursor.fetchall()
+        conn.close()
+        return users
+    except Exception as e:
+        logging.error(f"Ошибка get_users: {e}")
+        return []  # Fallback: пустой список
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
 dp = Dispatcher()
@@ -84,7 +95,7 @@ async def status(message: types.Message):
         logging.info(f"Игнор старой /status от {message.from_user.id}")
         return
     try:
-        await message.reply("🤖 Бот онлайн! Версия: 1.4 (пинг всех из БД)")
+        await message.reply("🤖 Бот онлайн! Версия: 1.5 (пинг всех из /tmp БД)")
     except TelegramForbiddenError:
         logging.warning(f"Не могу ответить {message.from_user.id} — заблокирован")
 
@@ -113,52 +124,57 @@ async def ping_all_from_db(message: types.Message):
         await message.reply("Ошибка проверки прав.")
         return
     
-    # Получаем юзеров из БД
-    try:
-        users = get_users(chat.id)
-        if not users:
-            await message.reply("Нет данных о пользователях. Пусть напишут что-нибудь!")
+    # Пробуем из БД, fallback на админов
+    users = get_users(chat.id)
+    if not users:
+        logging.info("БД пуста — пингуем админов")
+        try:
+            admins = await bot.get_chat_administrators(chat.id)
+            users = [(a.user.id, a.user.username, a.user.first_name or "Admin") for a in admins]
+        except Exception as e:
+            await message.reply(f"Ошибка получения админов: {e}")
             return
-        
-        # Батчи по 10, пауза 3 сек
-        batch_size = 10
-        pinged_count = 0
-        for i in range(0, len(users), batch_size):
-            batch_users = users[i:i + batch_size]
-            mentions = []
-            for user_id, username, first_name in batch_users:
-                if username:
-                    mention = f'<a href="tg://user?id={user_id}">@{(username)}</a>'
-                else:
-                    mention = f'<a href="tg://user?id={user_id}">{first_name or "User"}</a>'
-                mentions.append(mention)
-            
-            text = "Пинг всех! " + " ".join(mentions)
-            try:
-                await bot.send_message(
-                    chat.id,
-                    text,
-                    disable_web_page_preview=True
-                )
-                pinged_count += len(batch_users)
-                await asyncio.sleep(3)  # Антифлуд
-            except TelegramBadRequest as e:
-                if "Too Many Requests" in str(e):
-                    await message.reply("Флуд-лимит! Подожди минуту.")
-                    return
-                logging.warning(f"Ошибка батча: {e}")
-                continue
-            except TelegramForbiddenError:
-                logging.warning(f"Заблокирован в {chat.id}")
-                continue
-            except Exception as e:
-                await message.reply(f"Ошибка отправки: {e}")
-                break
-        
-        await message.reply(f"Пинг завершён! Упомянуто {pinged_count} пользователей из БД.")
     
-    except Exception as e:
-        await message.reply(f"Ошибка чтения БД: {e}")
+    if not users:
+        await message.reply("Нет пользователей для пинга.")
+        return
+    
+    # Батчи по 10, пауза 3 сек
+    batch_size = 10
+    pinged_count = 0
+    for i in range(0, len(users), batch_size):
+        batch_users = users[i:i + batch_size]
+        mentions = []
+        for user_id, username, first_name in batch_users:
+            if username:
+                mention = f'<a href="tg://user?id={user_id}">@{(username)}</a>'
+            else:
+                mention = f'<a href="tg://user?id={user_id}">{first_name or "User"}</a>'
+            mentions.append(mention)
+        
+        text = "Пинг всех! " + " ".join(mentions)
+        try:
+            await bot.send_message(
+                chat.id,
+                text,
+                disable_web_page_preview=True
+            )
+            pinged_count += len(batch_users)
+            await asyncio.sleep(3)  # Антифлуд
+        except TelegramBadRequest as e:
+            if "Too Many Requests" in str(e):
+                await message.reply("Флуд-лимит! Подожди минуту.")
+                return
+            logging.warning(f"Ошибка батча: {e}")
+            continue
+        except TelegramForbiddenError:
+            logging.warning(f"Заблокирован в {chat.id}")
+            continue
+        except Exception as e:
+            await message.reply(f"Ошибка отправки: {e}")
+            break
+    
+    await message.reply(f"Пинг завершён! Упомянуто {pinged_count} пользователей.")
 
 # Запуск
 async def main():
