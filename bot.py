@@ -1,14 +1,17 @@
+import os
 import asyncio
 import logging
-import os  # Добавь это
+from datetime import datetime, timedelta  # Добавь это для проверки даты
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.exceptions import TelegramForbiddenError
 
-# Твой токен — теперь из env (Leapcell подставит его автоматически)
-BOT_TOKEN = os.getenv('BOT_TOKEN')  # Если не задан, будет None — добавь проверку ниже
+# Включи логи для отладки
+logging.basicConfig(level=logging.INFO)
 
-# Инициализация (добавь проверку, чтобы бот не запустился без токена)
+# Твой токен из env
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+
 if not BOT_TOKEN:
     logging.error("BOT_TOKEN не задан! Установи в Environment Variables.")
     exit(1)
@@ -16,12 +19,24 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-@dp.message(Command('status'))  # Новая команда: /status для проверки
+# Функция для проверки свежести (5 мин = 300 сек, меняй по вкусу)
+def is_recent_message(message_date):
+    now = datetime.utcnow()
+    message_time = datetime.fromtimestamp(message_date)
+    return (now - message_time) < timedelta(seconds=300)  # Только свежие
+
+@dp.message(Command('status'))
 async def status(message: types.Message):
+    if not is_recent_message(message.date):
+        logging.info(f"Игнор старой команды /status от {message.from_user.id}")
+        return  # Молча игнорим
     await message.reply("🤖 Бот онлайн и готов к работе! Версия: 1.0 (с пингом и статусом)")
 
 @dp.message(Command('ping'))
 async def ping_all(message: types.Message):
+    if not is_recent_message(message.date):
+        logging.info(f"Игнор старой команды /ping от {message.from_user.id}")
+        return  # Молча игнорим
     chat = message.chat
     if chat.type not in ['group', 'supergroup']:
         await message.reply("Эта команда работает только в группах!")
@@ -80,9 +95,8 @@ async def ping_all(message: types.Message):
                 parse_mode='HTML',
                 disable_web_page_preview=True
             )
-            await asyncio.sleep(1)  # Пауза, чтобы не флудить (Telegram лимит ~20 сек/мин)
+            await asyncio.sleep(1)  # Пауза, чтобы не флудить
         except TelegramForbiddenError:
-            # Если кто-то заблокировал бота, пропускаем
             continue
         except Exception as e:
             await message.reply(f"Ошибка при отправке: {e}")
