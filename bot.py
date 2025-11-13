@@ -1,110 +1,104 @@
-import os
 import asyncio
 import logging
-from datetime import datetime, timedelta  # Добавь это для проверки даты
+import os
+from datetime import datetime, timedelta, UTC  # Добавь UTC для фикса warning
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.exceptions import TelegramForbiddenError
+from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
 
-# Включи логи для отладки
+# Логи
 logging.basicConfig(level=logging.INFO)
 
-# Твой токен из env
+# Токен из env
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-
 if not BOT_TOKEN:
-    logging.error("BOT_TOKEN не задан! Установи в Environment Variables.")
+    logging.error("BOT_TOKEN не задан!")
     exit(1)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Функция для проверки свежести (5 мин = 300 сек, меняй по вкусу)
+# Фильтр свежести (5 мин) — ФИКС: message.date уже datetime, не timestamp
 def is_recent_message(message_date):
-    now = datetime.utcnow()
-    message_time = datetime.fromtimestamp(message_date)
-    return (now - message_time) < timedelta(seconds=300)  # Только свежие
+    now = datetime.now(UTC)  # Фикс deprecation
+    # message_time = datetime.fromtimestamp(message_date)  # УБРАЛ: уже datetime!
+    return (now - message_date) < timedelta(seconds=300)
 
 @dp.message(Command('status'))
 async def status(message: types.Message):
     if not is_recent_message(message.date):
-        logging.info(f"Игнор старой команды /status от {message.from_user.id}")
-        return  # Молча игнорим
-    await message.reply("🤖 Бот онлайн и готов к работе! Версия: 1.0 (с пингом и статусом)")
+        logging.info(f"Игнор старой /status от {message.from_user.id}")
+        return
+    await message.reply("🤖 Бот онлайн! Версия: 1.2 (фикс даты + антиконфликт)")
 
 @dp.message(Command('ping'))
-async def ping_all(message: types.Message):
+async def ping_admins(message: types.Message):
     if not is_recent_message(message.date):
-        logging.info(f"Игнор старой команды /ping от {message.from_user.id}")
-        return  # Молча игнорим
-    chat = message.chat
-    if chat.type not in ['group', 'supergroup']:
-        await message.reply("Эта команда работает только в группах!")
+        logging.info(f"Игнор старой /ping от {message.from_user.id}")
         return
     
-    # Проверяем, что бот — админ
+    chat = message.chat
+    if chat.type not in ['group', 'supergroup']:
+        await message.reply("Работает только в группах!")
+        return
+    
+    # Проверяем права бота
     try:
         me = await bot.get_me()
         member = await bot.get_chat_member(chat.id, me.id)
         if member.status not in ['administrator', 'creator']:
-            await message.reply("Я должен быть админом для пинга!")
+            await message.reply("Я должен быть админом!")
             return
     except Exception:
-        await message.reply("Ошибка: не могу проверить права.")
+        await message.reply("Ошибка проверки прав.")
         return
     
-    # Собираем список участников (с пагинацией, лимит 200 за раз)
-    members = []
-    offset = 0
-    limit = 200  # Telegram лимит на get_chat_members
-    
-    while True:
-        try:
-            batch = await bot.get_chat_members(chat.id, offset=offset, limit=limit)
-            if not batch:
-                break
-            members.extend([m for m in batch if not m.user.is_bot])  # Исключаем ботов
-            offset += limit
-        except Exception as e:
-            await message.reply(f"Ошибка при получении участников: {e}")
+    # Получаем админов
+    try:
+        admins = await bot.get_chat_administrators(chat.id)
+        if not admins:
+            await message.reply("Админов не найдено.")
             return
-    
-    if not members:
-        await message.reply("В группе нет участников (или только боты).")
-        return
-    
-    # Формируем сообщение с упоминаниями (чтобы не флудить, отправляем по 30 за раз)
-    batch_size = 30
-    for i in range(0, len(members), batch_size):
-        batch_members = members[i:i + batch_size]
-        mentions = []
-        for member in batch_members:
-            user = member.user
-            # Упоминание через HTML: <a href="tg://user?id=ID">Name</a>
-            if user.username:
-                mention = f'<a href="tg://user?id={user.id}">@{(user.username)}</a>'
-            else:
-                mention = f'<a href="tg://user?id={user.id}">{user.first_name or "User"}</a>'
-            mentions.append(mention)
         
-        text = "Пинг! " + " ".join(mentions)
-        try:
-            await bot.send_message(
-                chat.id,
-                text,
-                parse_mode='HTML',
-                disable_web_page_preview=True
-            )
-            await asyncio.sleep(1)  # Пауза, чтобы не флудить
-        except TelegramForbiddenError:
-            continue
-        except Exception as e:
-            await message.reply(f"Ошибка при отправке: {e}")
-            break
+        # Батчи по 10, пауза 3 сек
+        batch_size = 10
+        for i in range(0, len(admins), batch_size):
+            batch_admins = admins[i:i + batch_size]
+            mentions = []
+            for admin in batch_admins:
+                user = admin.user
+                if user.username:
+                    mention = f'<a href="tg://user?id={user.id}">@{(user.username)}</a>'
+                else:
+                    mention = f'<a href="tg://user?id={user.id}">{user.first_name or "Admin"}</a>'
+                mentions.append(mention)
+            
+            text = "Пинг админов! " + " ".join(mentions)
+            try:
+                await bot.send_message(
+                    chat.id,
+                    text,
+                    parse_mode='HTML',
+                    disable_web_page_preview=True
+                )
+                await asyncio.sleep(3)  # Антифлуд
+            except TelegramBadRequest as e:
+                if "Too Many Requests" in str(e):
+                    await message.reply("Флуд-лимит! Подожди минуту.")
+                    return
+                continue
+            except TelegramForbiddenError:
+                continue
+            except Exception as e:
+                await message.reply(f"Ошибка отправки: {e}")
+                break
+        
+        await message.reply(f"Пинг админов завершён! Упомянуто {len(admins)}.")
     
-    await message.reply(f"Пинг завершён! Упомянуто {len(members)} участников.")
+    except Exception as e:
+        await message.reply(f"Ошибка при получении админов: {e}")
 
-# Запуск бота
+# Запуск
 async def main():
     await dp.start_polling(bot)
 
