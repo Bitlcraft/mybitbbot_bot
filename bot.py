@@ -14,6 +14,10 @@ BOT_TOKEN = 'YOUR_BOT_TOKEN'
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+@dp.message(Command('status'))  # Новая команда: /status для проверки
+async def status(message: types.Message):
+    await message.reply("🤖 Бот онлайн и готов к работе! Версия: 1.0 (с пингом и статусом)")
+
 @dp.message(Command('ping'))
 async def ping_all(message: types.Message):
     chat = message.chat
